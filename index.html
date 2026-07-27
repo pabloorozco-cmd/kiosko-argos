@@ -182,10 +182,16 @@ video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:c
 /* ═══ CONFIG ═══ */
 const CFG = {
   SUPABASE_URL: "https://esfqzhlwvqnenrbvbsnb.supabase.co",
+  // Pega aquí la ANON KEY (Publishable, sb_publishable_... — NUNCA la secret).
+  // Con esto nadie tiene que configurar nada al abrir el link.
+  SUPABASE_ANON_KEY: "sb_publishable_G3PSW49MyZhfQLXCbRgEOw_UIStX5wN",
   BODEGAS: ["Morales", "Barcenas"],
 };
 const LS = localStorage;
-const key = () => LS.getItem("anon_key") || "";
+const _cfgKey = () => (/^(sb_publishable_|sb_|eyJ)/.test(CFG.SUPABASE_ANON_KEY||"")
+                       && !CFG.SUPABASE_ANON_KEY.startsWith("sb_secret"))
+                      ? CFG.SUPABASE_ANON_KEY : "";
+const key = () => LS.getItem("anon_key") || _cfgKey();
 const bodega = () => LS.getItem("bodega") || "";
 
 /* ═══ UTILS (ports de utils/db.py) ═══ */
@@ -249,14 +255,14 @@ const M = { get:k=>JSON.parse(LS.getItem("m_"+k)||"[]"), set:(k,v)=>LS.setItem("
 async function refrescarEspejos(){
   if(!navigator.onLine || !key()) return;
   try{
-    const [pil,veh,ped,car] = await Promise.all([
-      sbGet("/rest/v1/pilotos?select=id,dpi,licencia_num,nombre_completo,estado,foto_rostro&limit=3000"),
-      sbGet("/rest/v1/vehiculos?select=placa_cabezal,transporte_nombre&activo=eq.true&limit=3000"),
-      sbGet("/rest/v1/pedidos_cache?select=order_name,cliente_nombre,incoterm,status_odoo&limit=2000"),
-      sbGet("/rest/v1/importaciones_cache?select=importacion,licencia,piloto,placa,placa_plataforma,producto,cantidad_sacos,transporte,fecha_estimada&estado_odoo=eq.carta_porte&order=fecha_estimada.desc&limit=2500"),
-    ]);
-    M.set("pilotos",pil); M.set("vehiculos",veh); M.set("pedidos",ped); M.set("cartas",car);
-    LS.setItem("m_ts", Date.now());
+    // Una sola llamada segura (RLS activo): la función espejos_kiosko entrega
+    // los campos mínimos de pilotos, flota, pedidos y cartas de porte.
+    const r = await sbRpc("espejos_kiosko", {});
+    if(r && r.pilotos){
+      M.set("pilotos", r.pilotos); M.set("vehiculos", r.vehiculos||[]);
+      M.set("pedidos", r.pedidos||[]); M.set("cartas", r.cartas||[]);
+      LS.setItem("m_ts", Date.now());
+    }
   }catch(e){ console.log("espejos:", e.message); }
 }
 const buscarPiloto = dpi => { const n=normId(dpi);
