@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#071D49">
+<title>Kiosko Pilotos · Despachos Argos</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon-192.png">
+<style>
+:root{--azul:#071D49;--lima:#C4D600;--gris:#5A6478;--fondo:#F4F7FB;--rojo:#C0392B}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--fondo);color:#1A2333}
+header{background:#fff;padding:10px 14px;display:flex;align-items:center;gap:10px;
+  border-bottom:3px solid var(--lima);position:sticky;top:0;z-index:5}
+header .t{font-weight:800;color:var(--azul);font-size:1.05rem;line-height:1.1}
+header .b{font-size:.78rem;color:var(--gris)}
+#estado{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--gris)}
+#dot{width:10px;height:10px;border-radius:50%;background:#B33;transition:.3s}
+#dot.on{background:#2E9E5B}
+main{max-width:560px;margin:0 auto;padding:14px}
+section{display:none}section.act{display:block}
+.card{background:#fff;border:1px solid #E5EAF2;border-radius:16px;padding:16px;margin-bottom:12px;
+  box-shadow:0 10px 28px rgba(7,29,73,.06)}
+h2{color:var(--azul);font-size:1.15rem;margin:0 0 10px}
+p{line-height:1.45}
+.btn{display:block;width:100%;border:0;border-radius:14px;padding:16px;font-size:1.06rem;font-weight:800;
+  cursor:pointer;margin:8px 0}
+.btn.p{background:var(--lima);color:#25300A}
+.btn.s{background:#fff;color:var(--azul);border:2px solid #D8DFEA}
+.btn.gh{background:transparent;color:var(--gris);font-weight:600;padding:10px}
+.btn:disabled{opacity:.45}
+.menuop{display:flex;align-items:center;gap:12px;background:#fff;border:2px solid #E5EAF2;border-radius:14px;
+  padding:14px;margin:10px 0;cursor:pointer}
+.menuop .ic{font-size:1.9rem}
+.menuop .tt{font-weight:800;color:var(--azul);font-size:1.05rem}
+.menuop .ds{font-size:.82rem;color:var(--gris)}
+.menuop .fl{margin-left:auto;background:var(--lima);border-radius:50%;width:34px;height:34px;
+  display:flex;align-items:center;justify-content:center;font-weight:900;color:#25300A}
+input,select{width:100%;padding:14px;border:2px solid #D8DFEA;border-radius:12px;font-size:1.05rem;margin:6px 0}
+label{font-size:.82rem;color:var(--gris);font-weight:700}
+video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:cover}
+.aviso{border-radius:12px;padding:12px 14px;margin:10px 0;font-size:.92rem}
+.aviso.err{background:#FDECEA;color:#7A1E15;border:1px solid #F5C7C0}
+.aviso.ok{background:#EAF7EF;color:#1E5B37;border:1px solid #BFE5CC}
+.aviso.info{background:#EAF3FF;color:#1A3A66;border:1px solid #CBDFF7}
+.turnazo{font-size:4.2rem;font-weight:900;color:var(--azul);text-align:center;margin:6px 0}
+.badge{display:inline-block;background:var(--azul);color:#fff;border-radius:8px;padding:3px 10px;
+  font-size:.78rem;font-weight:800}
+.fila{display:flex;gap:10px}.fila>*{flex:1}
+.pend{background:#FFF8E1;border:1px solid #F0E0A0;border-radius:12px;padding:10px 12px;margin:8px 0;font-size:.88rem}
+.mini{font-size:.78rem;color:var(--gris)}
+#selfiewrap video,#selfiewrap canvas{max-height:44vh;border-radius:14px}
+.resline{padding:8px 0;border-bottom:1px solid #EEF2F7;font-size:.92rem}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="t">🚛 Despachos Argos</div>
+    <div class="b" id="hbod">Kiosko de pilotos</div>
+  </div>
+  <div id="estado"><span id="pendtag" class="mini"></span><div id="dot"></div></div>
+</header>
+<main>
+
+<section id="sc-setup" class="card">
+  <h2>⚙️ Configuración inicial</h2>
+  <p class="mini">Solo la primera vez. Pega la <b>anon key (Publishable)</b> del Supabase de
+  Despachos (Project Settings → API Keys → <b>anon public</b>). ⚠️ NUNCA la service key.</p>
+  <label>Anon key</label>
+  <input id="inkey" placeholder="sb_publishable_... o eyJ...">
+  <button class="btn p" onclick="guardarKey()">Guardar y continuar</button>
+</section>
+
+<section id="sc-bodega" class="card">
+  <h2>🏭 ¿En qué bodega está esta tablet?</h2>
+  <div id="bodbtns"></div>
+</section>
+
+<section id="sc-menu">
+  <div class="card">
+    <h2>¿A qué vienes hoy?</h2>
+    <div class="menuop" onclick="elegir('CIF')"><div class="ic">🚛</div>
+      <div><div class="tt">CIF · Despacho</div><div class="ds">Flete de Argos: cargas y entregas al cliente.</div></div>
+      <div class="fl">→</div></div>
+    <div class="menuop" onclick="elegir('FOB')"><div class="ic">🚚</div>
+      <div><div class="tt">FOB · Pedido</div><div class="ds">Vienes por un pedido del cliente. Trae tu número.</div></div>
+      <div class="fl">→</div></div>
+    <div class="menuop" onclick="elegir('IMP')"><div class="ic">🚢</div>
+      <div><div class="tt">Importación</div><div class="ds">Vienes a descargar producto importado.</div></div>
+      <div class="fl">→</div></div>
+  </div>
+  <div id="pendlist"></div>
+  <button class="btn gh" onclick="irBodega()">Cambiar bodega</button>
+</section>
+
+<section id="sc-scan">
+  <div class="card">
+    <h2>🪪 Escanea el reverso de tu licencia</h2>
+    <p class="mini">Apunta la cámara al <b>código ancho de abajo</b> (PDF-417). Se lee solo,
+    sin tomar foto y sin internet.</p>
+    <video id="vid" playsinline muted></video>
+    <div id="scanmsg" class="mini" style="text-align:center;margin-top:6px">Iniciando cámara…</div>
+    <button class="btn gh" onclick="volverMenu()">← Volver</button>
+  </div>
+</section>
+
+<section id="sc-bloqueo">
+  <div class="card">
+    <div id="bloqueomsg" class="aviso err"></div>
+    <button class="btn s" onclick="volverMenu()">Entendido</button>
+  </div>
+</section>
+
+<section id="sc-selfie">
+  <div class="card">
+    <h2>📸 Eres nuevo: tómate una foto</h2>
+    <p class="mini" id="selfienom"></p>
+    <div id="selfiewrap"><video id="vids" playsinline muted></video><canvas id="cnv" style="display:none;width:100%"></canvas></div>
+    <button class="btn p" id="btnshot" onclick="tomarSelfie()">📸 Tomar foto</button>
+    <div id="selfieacts" style="display:none">
+      <button class="btn p" onclick="selfieOk()">✅ Usar esta foto</button>
+      <button class="btn s" onclick="selfieRetry()">↺ Repetir</button>
+    </div>
+  </div>
+</section>
+
+<section id="sc-placa">
+  <div class="card">
+    <h2 id="welc"></h2>
+    <label>Placa del cabezal</label>
+    <input id="inplaca" placeholder="Ej: C-123ABC" autocapitalize="characters">
+    <div id="fobped" style="display:none">
+      <label>Número(s) de pedido — separa con coma</label>
+      <input id="inped" placeholder="Ej: S12345, S12346">
+    </div>
+    <div id="placamsg"></div>
+    <button class="btn p" onclick="pasoConfirm()">Continuar →</button>
+    <button class="btn gh" onclick="volverMenu()">← Cancelar</button>
+  </div>
+</section>
+
+<section id="sc-imp">
+  <div class="card">
+    <h2 id="welci"></h2>
+    <div id="impinfo"></div>
+    <label>Número de importación</label>
+    <input id="inimp" placeholder="Ej: IMP-2026-2539 o solo 2539">
+    <div class="fila">
+      <div><label>Producto</label><input id="inprod" placeholder="Ej: ECO"></div>
+      <div><label>Cantidad (sacos)</label><input id="incant" inputmode="numeric" placeholder="600"></div>
+    </div>
+    <div class="fila">
+      <div><label>Placa cabezal</label><input id="incab" placeholder="C-141CBG"></div>
+      <div><label>Plataforma</label><input id="inplat" placeholder="TC-87CDQ"></div>
+    </div>
+    <div id="impmsg"></div>
+    <button class="btn p" onclick="pasoConfirmImp()">Continuar →</button>
+    <button class="btn gh" onclick="volverMenu()">← Cancelar</button>
+  </div>
+</section>
+
+<section id="sc-confirm">
+  <div class="card">
+    <h2>Confirma tus datos</h2>
+    <div id="resumen"></div>
+    <button class="btn p" onclick="enviar()">✅ Confirmar y obtener turno</button>
+    <button class="btn gh" onclick="volverMenu()">← Empezar de nuevo</button>
+  </div>
+</section>
+
+<section id="sc-turno">
+  <div class="card" style="text-align:center">
+    <div id="turnores"></div>
+    <button class="btn p" onclick="volverMenu()">🏁 Listo — siguiente piloto</button>
+  </div>
+</section>
+
+</main>
+<script>
+/* ═══ CONFIG ═══ */
+const CFG = {
+  SUPABASE_URL: "https://esfqzhlwvqnenrbvbsnb.supabase.co",
+  BODEGAS: ["Morales", "Barcenas"],
+};
+const LS = localStorage;
+const key = () => LS.getItem("anon_key") || "";
+const bodega = () => LS.getItem("bodega") || "";
+
+/* ═══ UTILS (ports de utils/db.py) ═══ */
+const normId  = s => String(s||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+const canon   = s => { s=normId(s); const m=s.match(/\d/); return m? s.slice(s.indexOf(m[0])) : s; };
+const canonD  = s => { s=normId(s); const m=s.match(/\d/); const i=m?s.indexOf(m[0]):0;
+                       return (m&&i>0)? s.slice(0,i)+"-"+s.slice(i) : s; };
+const normPed = s => { s=normId(s); return s && !s.startsWith("S") ? "S"+s : s; };
+const normImp = normId;
+const hoyGT = () => new Date(new Date().toLocaleString("en-US",{timeZone:"America/Guatemala"}));
+
+function parsePayload(t){
+  t = String(t||"").trim();
+  if(!t || t.startsWith("http") || (t.match(/\|/g)||[]).length < 9)
+    return {estado:"formato_desconocido", raw:t};
+  const f = t.split("|");
+  if(f.length < 10) return {estado:"formato_desconocido", raw:t};
+  const fecha = s => { const m = String(s||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+                       return m ? new Date(+m[3], +m[2]-1, +m[1]) : null; };
+  const nac = fecha(f[6]), ven = fecha(f[7]);
+  const nombre = [f[2],f[3],f[4],f[5]].map(x=>String(x||"").trim()).filter(Boolean).join(" ");
+  let vig = null;
+  if(ven){ const h=hoyGT(); h.setHours(0,0,0,0); vig = ven >= h; }
+  return {estado:"ok", correlativo:f[0].trim(), tipo:(f[1]||"").trim().toUpperCase(),
+          nombre, nacimiento:nac, vence:ven, vigente:vig,
+          cui:(f[8]||"").trim(), telefono:(f[9]||"").trim(), raw:t};
+}
+function validarIngreso(r){
+  const letras = new Set((r.tipo||"").toUpperCase().replace(/[^A-Z]/g,"").split(""));
+  if(!letras.has("A"))
+    return `⛔ Tu licencia es tipo ${r.tipo||"—"}. Para ingresar se requiere licencia TIPO A.`;
+  if(r.vigente === false)
+    return `⛔ Tu licencia está VENCIDA${r.vence?` (venció el ${r.vence.toLocaleDateString("es-GT")})`:""}. Renuévala para poder ingresar.`;
+  return null;
+}
+const fISO = d => d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}` : null;
+
+/* ═══ SUPABASE REST ═══ */
+async function sbGet(path){
+  const r = await fetch(CFG.SUPABASE_URL+path, {headers:{apikey:key(),Authorization:"Bearer "+key()}});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+async function sbRpc(fn, args){
+  const r = await fetch(CFG.SUPABASE_URL+"/rest/v1/rpc/"+fn, {
+    method:"POST", headers:{apikey:key(),Authorization:"Bearer "+key(),"Content-Type":"application/json"},
+    body:JSON.stringify(args)});
+  if(!r.ok) throw new Error("RPC "+r.status+": "+await r.text());
+  return r.json();
+}
+async function sbUpload(path, blob){
+  const r = await fetch(CFG.SUPABASE_URL+"/storage/v1/object/fotos/"+path, {
+    method:"POST", headers:{apikey:key(),Authorization:"Bearer "+key(),
+    "Content-Type":"image/jpeg","x-upsert":"true"}, body:blob});
+  if(!r.ok) throw new Error("Storage "+r.status);
+  return CFG.SUPABASE_URL+"/storage/v1/object/public/fotos/"+path;
+}
+
+/* ═══ ESPEJOS LOCALES (para trabajar sin señal) ═══ */
+const M = { get:k=>JSON.parse(LS.getItem("m_"+k)||"[]"), set:(k,v)=>LS.setItem("m_"+k,JSON.stringify(v)) };
+async function refrescarEspejos(){
+  if(!navigator.onLine || !key()) return;
+  try{
+    const [pil,veh,ped,car] = await Promise.all([
+      sbGet("/rest/v1/pilotos?select=id,dpi,licencia_num,nombre_completo,estado,foto_rostro&limit=3000"),
+      sbGet("/rest/v1/vehiculos?select=placa_cabezal,transporte_nombre&activo=eq.true&limit=3000"),
+      sbGet("/rest/v1/pedidos_cache?select=order_name,cliente_nombre,incoterm,status_odoo&limit=2000"),
+      sbGet("/rest/v1/importaciones_cache?select=importacion,licencia,piloto,placa,placa_plataforma,producto,cantidad_sacos,transporte,fecha_estimada&estado_odoo=eq.carta_porte&order=fecha_estimada.desc&limit=2500"),
+    ]);
+    M.set("pilotos",pil); M.set("vehiculos",veh); M.set("pedidos",ped); M.set("cartas",car);
+    LS.setItem("m_ts", Date.now());
+  }catch(e){ console.log("espejos:", e.message); }
+}
+const buscarPiloto = dpi => { const n=normId(dpi);
+  return M.get("pilotos").find(p => normId(p.dpi)===n || normId(p.licencia_num)===n) || null; };
+const transporteDePlaca = pl => { const c=canon(pl);
+  const v = M.get("vehiculos").find(v => canon(v.placa_cabezal)===c); return v? v.transporte_nombre : ""; };
+const pedidoEnCache = num => { const n=normPed(num);
+  return M.get("pedidos").find(p => normId(p.order_name)===n) || null; };
+const cartasDe = lic => { const n=normId(lic);
+  return M.get("cartas").filter(c => normId(c.licencia)===n); };
+function cartaPorNumero(num, lic){
+  const n=normImp(num), cs=M.get("cartas");
+  const match = c => normImp(c.importacion)===n ||
+                     (/^\d{3,}$/.test(n) && normImp(c.importacion).endsWith(n));
+  if(lic){ const mia = cs.find(c => normId(c.licencia)===normId(lic) && match(c)); if(mia) return {row:mia, mia:true}; }
+  const otra = cs.find(match); return otra? {row:otra, mia:false} : null;
+}
+
+/* ═══ COLA OFFLINE ═══ */
+const Q = { get:()=>JSON.parse(LS.getItem("cola")||"[]"), set:v=>LS.setItem("cola",JSON.stringify(v)) };
+function encolar(item){ const q=Q.get(); q.push(item); Q.set(q); pintarPendientes(); }
+async function sincronizar(){
+  if(!navigator.onLine) return;
+  let q = Q.get(); if(!q.length){ pintarPendientes(); return; }
+  for(const it of q){
+    if(it.listo) continue;
+    try{
+      if(it.foto && !it.args.p_foto_url){
+        const blob = await (await fetch(it.foto)).blob();
+        it.args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(it.args.p_dpi)}_${it.id}.jpg`, blob);
+        it.foto = null; Q.set(q);
+      }
+      const r = await sbRpc("registrar_llegada_kiosko", it.args);
+      if(r && r.ok){ it.listo=true; it.turno=r.turno; it.nombre=r.nombre; Q.set(q); }
+    }catch(e){ console.log("sync:", e.message); break; }
+  }
+  Q.set(q.filter(it => !it.listo || (Date.now()-it.ts) < 3600e3));
+  pintarPendientes();
+}
+function pintarPendientes(){
+  const q=Q.get(), pend=q.filter(i=>!i.listo).length;
+  document.getElementById("pendtag").textContent = pend? `${pend} por enviar`: "";
+  const el=document.getElementById("pendlist");
+  el.innerHTML = q.length ? "<div class='card'><b>Últimos registros</b>" + q.slice(-8).reverse().map(i =>
+    `<div class='resline'>${i.listo? "✅ <b>Turno #"+i.turno+"</b>" : "⏳ En cola local"} · ${i.args.p_nombre||i.args.p_dpi} · ${i.args.p_tipo}</div>`).join("") + "</div>" : "";
+}
+
+/* ═══ NAVEGACIÓN ═══ */
+let ST = {};   // estado del flujo actual
+const scr = id => { document.querySelectorAll("section").forEach(s=>s.classList.remove("act"));
+                    document.getElementById(id).classList.add("act"); };
+function volverMenu(){ pararCam(); ST={}; scr("sc-menu"); pintarPendientes(); }
+function irBodega(){ scr("sc-bodega"); }
+function elegir(tipo){ ST={tipo}; iniciarScan(); }
+
+/* ═══ ESCÁNER PDF417 (en el dispositivo) ═══ */
+let stream=null, scanTimer=null, zx=null;
+function pararCam(){ if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
+  if(zx){try{zx.reset()}catch(e){} zx=null;}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  const vs=document.getElementById("vids"); if(vs&&vs.srcObject){vs.srcObject.getTracks().forEach(t=>t.stop());vs.srcObject=null;} }
+async function iniciarScan(){
+  scr("sc-scan"); const v=document.getElementById("vid"), msg=document.getElementById("scanmsg");
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1920}}});
+    v.srcObject = stream; await v.play();
+  }catch(e){ msg.textContent="No se pudo abrir la cámara: "+e.message; return; }
+  if("BarcodeDetector" in window){
+    try{
+      const fmts = await BarcodeDetector.getSupportedFormats();
+      if(fmts.includes("pdf417")){
+        msg.textContent="Buscando el código…";
+        const det = new BarcodeDetector({formats:["pdf417"]});
+        scanTimer = setInterval(async ()=>{ try{
+          const codes = await det.detect(v);
+          if(codes.length) onScan(codes[0].rawValue);
+        }catch(e){} }, 250);
+        return;
+      }
+    }catch(e){}
+  }
+  msg.textContent="Cargando lector…";
+  await new Promise((res,rej)=>{ const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
+    s.onload=res; s.onerror=()=>rej(new Error("sin lector")); document.head.appendChild(s);})
+    .catch(e=>{ msg.textContent="Este navegador no puede escanear. Usa Chrome."; });
+  if(!window.ZXing) return;
+  const hints = new Map(); hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.PDF_417]);
+  zx = new ZXing.BrowserMultiFormatReader(hints);
+  msg.textContent="Buscando el código…";
+  zx.decodeFromVideoElementContinuously(v,(r,err)=>{ if(r) onScan(r.getText()); });
+}
+function onScan(texto){
+  const r = parsePayload(texto);
+  if(r.estado!=="ok" || !r.cui) return;      // sigue buscando
+  pararCam();
+  const bloqueo = validarIngreso(r);
+  if(bloqueo){ document.getElementById("bloqueomsg").textContent=bloqueo; scr("sc-bloqueo"); return; }
+  ST.lic = r;
+  const p = buscarPiloto(r.cui);
+  if(p && p.estado && p.estado!=="activo"){
+    document.getElementById("bloqueomsg").textContent="Tu registro está inactivo. Acércate al supervisor.";
+    scr("sc-bloqueo"); return;
+  }
+  ST.piloto = p; ST.nombre = p? p.nombre_completo : titulo(r.nombre);
+  if(!p){ iniciarSelfie(); return; }
+  siguientePaso();
+}
+const titulo = s => String(s||"").toLowerCase().replace(/\b\w/g,c=>c.toUpperCase());
+function siguientePaso(){
+  if(ST.tipo==="IMP"){ prepararImp(); }
+  else{
+    document.getElementById("welc").textContent = `👋 Bienvenido, ${ST.nombre}`;
+    document.getElementById("fobped").style.display = ST.tipo==="FOB" ? "block" : "none";
+    document.getElementById("placamsg").innerHTML=""; scr("sc-placa");
+  }
+}
+
+/* ═══ SELFIE (piloto nuevo) ═══ */
+async function iniciarSelfie(){
+  scr("sc-selfie");
+  document.getElementById("selfienom").textContent = ST.nombre + " — la foto queda en tu registro.";
+  document.getElementById("btnshot").style.display="block";
+  document.getElementById("selfieacts").style.display="none";
+  document.getElementById("cnv").style.display="none";
+  const v=document.getElementById("vids"); v.style.display="block";
+  try{ const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}});
+       v.srcObject=s; await v.play(); }catch(e){ alert("Cámara frontal no disponible: "+e.message); }
+}
+function tomarSelfie(){
+  const v=document.getElementById("vids"), c=document.getElementById("cnv");
+  const w=720, h=Math.round(v.videoHeight*(w/v.videoWidth))||960;
+  c.width=w; c.height=h; c.getContext("2d").drawImage(v,0,0,w,h);
+  v.style.display="none"; c.style.display="block";
+  document.getElementById("btnshot").style.display="none";
+  document.getElementById("selfieacts").style.display="block";
+}
+function selfieRetry(){ iniciarSelfie(); }
+function selfieOk(){
+  ST.foto = document.getElementById("cnv").toDataURL("image/jpeg",0.82);
+  pararCam(); siguientePaso();
+}
+
+/* ═══ PASOS CIF / FOB ═══ */
+function pasoConfirm(){
+  const placa = canonD(document.getElementById("inplaca").value);
+  const msg = document.getElementById("placamsg"); msg.innerHTML="";
+  if(!placa || placa.length<4){ msg.innerHTML="<div class='aviso err'>Escribe la placa del cabezal.</div>"; return; }
+  ST.placa = placa;
+  if(ST.tipo==="CIF"){
+    ST.empresa = transporteDePlaca(placa) || "CIF";
+    ST.pedidos = "";
+  }else{
+    const txt = document.getElementById("inped").value.trim();
+    if(!txt){ msg.innerHTML="<div class='aviso err'>Escribe tu número de pedido.</div>"; return; }
+    const nums=[...new Set(txt.split(/[\s,]+/).filter(Boolean).map(normPed))], malos=[], clientes=[];
+    for(const n of nums){
+      const p = pedidoEnCache(n);
+      if(!p) malos.push(`${n}: no aparece en el sistema`);
+      else if((p.status_odoo||"")!=="listo") malos.push(`${n}: aún no está listo`);
+      else if(p.cliente_nombre && !clientes.includes(p.cliente_nombre)) clientes.push(p.cliente_nombre);
+    }
+    if(malos.length){
+      msg.innerHTML = "<div class='aviso err'>❌ "+malos.join("<br>❌ ")+
+        "<br><b>Sin un pedido válido no se asigna turno.</b> Verifica el número o acércate al supervisor.</div>";
+      return;
+    }
+    ST.pedidos = nums.join(", "); ST.empresa = clientes.join(" / ") || "FOB";
+  }
+  pintarResumen(); scr("sc-confirm");
+}
+
+/* ═══ PASO IMPORTACIÓN ═══ */
+function prepararImp(){
+  document.getElementById("welci").textContent = `👋 Hola, ${ST.nombre}`;
+  const cartas = cartasDe(ST.lic.cui.length? ST.lic.cui : "") .concat(cartasDe(ST.lic.correlativo||""));
+  const c = cartas[0] || null;
+  document.getElementById("impinfo").innerHTML = c ?
+    `<div class='aviso ok'>Encontramos tu carta de porte más reciente. Confirma o corrige el número.</div>` :
+    `<div class='aviso info'>No encontramos tu carta de porte aún. Escribe tus datos.</div>`;
+  document.getElementById("inimp").value  = c? c.importacion : "";
+  document.getElementById("inprod").value = c? (c.producto||"") : "";
+  document.getElementById("incant").value = c && c.cantidad_sacos ? c.cantidad_sacos : "";
+  document.getElementById("incab").value  = c? (c.placa||"") : "";
+  document.getElementById("inplat").value = c? (c.placa_plataforma||"") : "";
+  ST.transporte = c? (c.transporte||"") : "";
+  document.getElementById("impmsg").innerHTML="";
+  const inimp = document.getElementById("inimp");
+  inimp.onblur = () => {
+    const res = cartaPorNumero(inimp.value, ST.lic.cui);
+    if(!res) return;
+    inimp.value = res.row.importacion;
+    if(!document.getElementById("inprod").value) document.getElementById("inprod").value = res.row.producto||"";
+    if(!document.getElementById("incant").value && res.row.cantidad_sacos) document.getElementById("incant").value = res.row.cantidad_sacos;
+    if(res.mia){   // placas SOLO si la carta es del mismo piloto
+      if(!document.getElementById("incab").value)  document.getElementById("incab").value  = res.row.placa||"";
+      if(!document.getElementById("inplat").value) document.getElementById("inplat").value = res.row.placa_plataforma||"";
+    }
+    ST.transporte = res.row.transporte || ST.transporte;
+  };
+  scr("sc-imp");
+}
+function pasoConfirmImp(){
+  const num=document.getElementById("inimp").value.trim(), prod=document.getElementById("inprod").value.trim(),
+        cant=document.getElementById("incant").value.trim(), cab=canonD(document.getElementById("incab").value),
+        plat=canonD(document.getElementById("inplat").value), msg=document.getElementById("impmsg");
+  if(!num||!prod||!cant||!cab){ msg.innerHTML="<div class='aviso err'>Completa importación, producto, cantidad y cabezal.</div>"; return; }
+  const res = cartaPorNumero(num, ST.lic.cui);
+  ST.imp = res? res.row.importacion : num.toUpperCase();
+  ST.producto=prod; ST.cantidad=parseInt(cant)||null; ST.placa=cab; ST.plataforma=plat;
+  ST.empresa = ST.transporte || "Importación";
+  pintarResumen(); scr("sc-confirm");
+}
+
+/* ═══ CONFIRMAR + ENVIAR ═══ */
+function pintarResumen(){
+  const l=[];
+  l.push(`<div class='resline'>👤 <b>${ST.nombre}</b> <span class='badge'>${ST.tipo}</span></div>`);
+  l.push(`<div class='resline'>🚗 ${ST.placa}${ST.plataforma? " · 🛻 "+ST.plataforma:""}</div>`);
+  if(ST.tipo==="IMP") l.push(`<div class='resline'>🚢 ${ST.imp} · 📦 ${ST.producto} · ${ST.cantidad||"—"} sacos</div>`);
+  if(ST.tipo==="FOB") l.push(`<div class='resline'>📄 ${ST.pedidos} · 🏢 ${ST.empresa}</div>`);
+  if(ST.tipo==="CIF") l.push(`<div class='resline'>🚛 ${ST.empresa}</div>`);
+  document.getElementById("resumen").innerHTML = l.join("");
+}
+async function enviar(){
+  const args = {
+    p_bodega: bodega(), p_tipo: ST.tipo, p_dpi: ST.lic.cui,
+    p_nombre: ST.nombre, p_placa: ST.placa||"", p_empresa: ST.empresa||"",
+    p_pedidos: ST.pedidos||"", p_importacion: ST.imp||"",
+    p_producto: ST.producto||"", p_plataforma: ST.plataforma||"",
+    p_cantidad: ST.cantidad||null, p_foto_url: "",
+    p_tipo_lic: ST.lic.tipo||"", p_lic_vence: fISO(ST.lic.vence),
+    p_telefono: ST.lic.telefono||"", p_nacimiento: fISO(ST.lic.nacimiento),
+  };
+  const el = document.getElementById("turnores");
+  if(navigator.onLine && key()){
+    try{
+      if(ST.foto){ const blob=await (await fetch(ST.foto)).blob();
+        args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(args.p_dpi)}_${Date.now()}.jpg`, blob); }
+      const r = await sbRpc("registrar_llegada_kiosko", args);
+      if(r && r.ok){
+        el.innerHTML = `<h2>🎫 Tu turno</h2><div class='turnazo'>#${r.turno}</div>
+          <p><b>${r.nombre}</b> · ${ST.tipo}<br>Espera a que el supervisor te llame.</p>`;
+        scr("sc-turno"); ST={}; refrescarEspejos(); return;
+      }
+      el.innerHTML = `<div class='aviso err'>${(r&&r.error)||"Error"}</div>`; scr("sc-turno"); return;
+    }catch(e){ /* sin señal a mitad → cae a la cola */ }
+  }
+  encolar({id:Date.now().toString(36), ts:Date.now(), args, foto:ST.foto||null});
+  el.innerHTML = `<h2>📶 Sin señal — quedaste GUARDADO</h2>
+    <p>Tu registro está en la fila local. En cuanto vuelva la señal se envía solo y
+    tu <b>número de turno aparecerá en la pantalla de inicio</b>.</p>`;
+  scr("sc-turno"); ST={};
+}
+
+/* ═══ ARRANQUE ═══ */
+function guardarKey(){ const k=document.getElementById("inkey").value.trim();
+  if(k.length<20){ alert("Pega la anon key completa."); return; }
+  LS.setItem("anon_key",k); arrancar(); }
+function pintarBodegas(){
+  document.getElementById("bodbtns").innerHTML = CFG.BODEGAS.map(b =>
+    `<button class="btn p" onclick="LS.setItem('bodega','${b}');arrancar()">${b}</button>`).join("");
+}
+function estadoRed(){ document.getElementById("dot").className = navigator.onLine? "on":""; }
+function arrancar(){
+  estadoRed();
+  const qs = new URLSearchParams(location.search);
+  if(qs.get("bodega")) LS.setItem("bodega", qs.get("bodega"));
+  if(!key()){ scr("sc-setup"); return; }
+  if(!bodega()){ pintarBodegas(); scr("sc-bodega"); return; }
+  document.getElementById("hbod").textContent = "Bodega " + bodega();
+  scr("sc-menu"); pintarPendientes(); refrescarEspejos(); sincronizar();
+}
+window.addEventListener("online", ()=>{estadoRed();sincronizar();refrescarEspejos();});
+window.addEventListener("offline", estadoRed);
+setInterval(sincronizar, 20000);
+setInterval(refrescarEspejos, 10*60*1000);
+if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
+arrancar();
+</script>
+</body>
+</html>
