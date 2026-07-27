@@ -98,10 +98,16 @@ video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:c
 <section id="sc-scan">
   <div class="card">
     <h2>🪪 Escanea el reverso de tu licencia</h2>
-    <p class="mini">Apunta la cámara al <b>código ancho de abajo</b> (PDF-417). Se lee solo,
-    sin tomar foto y sin internet.</p>
+    <p class="mini">Apunta al <b>código ancho de abajo</b> (PDF-417) a <b>15–25 cm</b>,
+    firme y sin reflejo. Si en unos segundos no lee, usa <b>📸 Tomar FOTO</b>
+    (la cámara nativa enfoca mejor). Todo se lee en el dispositivo.</p>
     <video id="vid" playsinline muted></video>
     <div id="scanmsg" class="mini" style="text-align:center;margin-top:6px">Iniciando cámara…</div>
+    <div class="fila">
+      <button class="btn s" id="btntorch" style="display:none" onclick="toggleTorch()">🔦 Luz</button>
+      <button class="btn s" onclick="fotoModo()">📸 Tomar FOTO</button>
+    </div>
+    <input type="file" id="fscan" accept="image/*" capture="environment" style="display:none">
     <button class="btn gh" onclick="volverMenu()">← Volver</button>
   </div>
 </section>
@@ -178,6 +184,7 @@ video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:c
 </section>
 
 </main>
+<script src="./zxingjs.js"></script>
 <script>
 /* ═══ CONFIG ═══ */
 const CFG = {
@@ -318,42 +325,105 @@ function volverMenu(){ pararCam(); ST={}; scr("sc-menu"); pintarPendientes(); }
 function irBodega(){ scr("sc-bodega"); }
 function elegir(tipo){ ST={tipo}; iniciarScan(); }
 
-/* ═══ ESCÁNER PDF417 (en el dispositivo) ═══ */
-let stream=null, scanTimer=null, zx=null;
-function pararCam(){ if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
-  if(zx){try{zx.reset()}catch(e){} zx=null;}
-  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
-  const vs=document.getElementById("vids"); if(vs&&vs.srcObject){vs.srcObject.getTracks().forEach(t=>t.stop());vs.srcObject=null;} }
-async function iniciarScan(){
-  scr("sc-scan"); const v=document.getElementById("vid"), msg=document.getElementById("scanmsg");
+/* ═══ ESCÁNER PDF417 (100% en el dispositivo) ═══
+   Motores: 1) BarcodeDetector (ML Kit de Chrome) si existe
+            2) @zxing/library local (zxingjs.js) — verificado con licencias
+               borrosas y pequeñas. También lee la FOTO nativa (modo foto). */
+const el = id => document.getElementById(id);
+let stream=null, scanTimer=null, det=null, track=null, torchOn=false, zreader=null;
+function lectorJS(){
+  if(zreader || !window.ZXing) return zreader;
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.PDF_417]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  zreader = new ZXing.MultiFormatReader(); zreader.setHints(hints);
+  return zreader;
+}
+function jsDecode(cv){
+  const rd = lectorJS(); if(!rd) return null;
   try{
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1920}}});
+    const lum = new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    const bin = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+    const r = rd.decode(bin); rd.reset();
+    return r.getText();
+  }catch(e){ try{rd.reset();}catch(_){} return null; }
+}
+function pararCam(){
+  if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
+  det=null; track=null; torchOn=false;
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  const vs=el("vids"); if(vs&&vs.srcObject){vs.srcObject.getTracks().forEach(t=>t.stop());vs.srcObject=null;}
+}
+async function iniciarScan(){
+  scr("sc-scan"); const v=el("vid"), msg=el("scanmsg");
+  msg.textContent="Iniciando cámara…"; el("btntorch").style.display="none";
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{
+      facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}});
     v.srcObject = stream; await v.play();
-  }catch(e){ msg.textContent="No se pudo abrir la cámara: "+e.message; return; }
+  }catch(e){
+    msg.textContent = "No se pudo abrir la cámara ("+e.message+"). Usa 📸 Tomar FOTO.";
+    return;
+  }
+  track = stream.getVideoTracks()[0];
+  try{  // enfoque continuo + un poco de zoom (más nitidez sin acercarse tanto)
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const adv = [];
+    if(caps.focusMode && caps.focusMode.includes("continuous")) adv.push({focusMode:"continuous"});
+    if(caps.zoom && caps.zoom.max >= 1.5) adv.push({zoom: Math.min(2, caps.zoom.max)});
+    if(adv.length) await track.applyConstraints({advanced:adv}).catch(()=>{});
+    if(caps.torch) el("btntorch").style.display="block";
+  }catch(e){}
+  det = null;
   if("BarcodeDetector" in window){
     try{
       const fmts = await BarcodeDetector.getSupportedFormats();
-      if(fmts.includes("pdf417")){
-        msg.textContent="Buscando el código…";
-        const det = new BarcodeDetector({formats:["pdf417"]});
-        scanTimer = setInterval(async ()=>{ try{
-          const codes = await det.detect(v);
-          if(codes.length) onScan(codes[0].rawValue);
-        }catch(e){} }, 250);
-        return;
-      }
+      if(fmts.includes("pdf417")) det = new BarcodeDetector({formats:["pdf417"]});
     }catch(e){}
   }
-  msg.textContent="Cargando lector…";
-  await new Promise((res,rej)=>{ const s=document.createElement("script");
-    s.src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
-    s.onload=res; s.onerror=()=>rej(new Error("sin lector")); document.head.appendChild(s);})
-    .catch(e=>{ msg.textContent="Este navegador no puede escanear. Usa Chrome."; });
-  if(!window.ZXing) return;
-  const hints = new Map(); hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.PDF_417]);
-  zx = new ZXing.BrowserMultiFormatReader(hints);
-  msg.textContent="Buscando el código…";
-  zx.decodeFromVideoElementContinuously(v,(r,err)=>{ if(r) onScan(r.getText()); });
+  msg.textContent = "Buscando el código… sostén la licencia FIRME a 15–25 cm.";
+  const cv = document.createElement("canvas");
+  const cx = cv.getContext("2d", {willReadFrequently:true});
+  let busy = false;
+  scanTimer = setInterval(async ()=>{
+    if(busy || !v.videoWidth) return; busy = true;
+    try{
+      if(det){
+        const cs = await det.detect(v).catch(()=>[]);
+        if(cs && cs.length && cs[0].rawValue){ onScan(cs[0].rawValue); busy=false; return; }
+      }
+      const W = Math.min(1280, v.videoWidth);
+      cv.width = W; cv.height = Math.round(v.videoHeight * W / v.videoWidth);
+      cx.drawImage(v, 0, 0, cv.width, cv.height);
+      const t = jsDecode(cv);
+      if(t) onScan(t);
+    }catch(e){}
+    busy = false;
+  }, 600);
+}
+async function decodificarFoto(file){
+  const msg = el("scanmsg");
+  msg.textContent = "Leyendo la foto…";
+  const img = new Image(); img.src = URL.createObjectURL(file);
+  try{ await img.decode(); }catch(e){ msg.textContent="No se pudo abrir la foto."; return; }
+  const cv = document.createElement("canvas");
+  const cx = cv.getContext("2d", {willReadFrequently:true});
+  // varias escalas: las fotos nativas son enormes; probamos de mayor a menor
+  for(const W of [1600, 1100, 2200, 800]){
+    const w = Math.min(W, img.naturalWidth);
+    cv.width = w; cv.height = Math.round(img.naturalHeight * w / img.naturalWidth);
+    cx.drawImage(img, 0, 0, cv.width, cv.height);
+    const t = jsDecode(cv);
+    if(t){ URL.revokeObjectURL(img.src); onScan(t); return; }
+  }
+  URL.revokeObjectURL(img.src);
+  msg.textContent = "No se leyó en esa foto. Que el código ancho LLENE la foto, "
+                  + "sin reflejo, y toma otra.";
+}
+function fotoModo(){ el("fscan").click(); }
+async function toggleTorch(){
+  if(!track) return; torchOn = !torchOn;
+  try{ await track.applyConstraints({advanced:[{torch: torchOn}]}); }catch(e){}
 }
 function onScan(texto){
   const r = parsePayload(texto);
@@ -538,6 +608,11 @@ function arrancar(){
 }
 window.addEventListener("online", ()=>{estadoRed();sincronizar();refrescarEspejos();});
 window.addEventListener("offline", estadoRed);
+el("fscan").onchange = ev => {
+  const f = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if(f) decodificarFoto(f);
+};
 setInterval(sincronizar, 20000);
 setInterval(refrescarEspejos, 10*60*1000);
 if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
