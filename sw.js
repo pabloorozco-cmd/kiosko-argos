@@ -1,7 +1,7 @@
 /* Service worker del Kiosko — la app abre AL INSTANTE aunque no haya señal.
    App shell: cache-first (index, manifest, íconos, lector de códigos).
    Supabase: siempre red (nunca se cachean datos ni registros). */
-const CACHE = "kiosko-v1";
+const CACHE = "kiosko-v3";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest",
                "./icon-192.png", "./icon-512.png"];
 
