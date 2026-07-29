@@ -288,33 +288,81 @@ function cartaPorNumero(num, lic){
   const otra = cs.find(match); return otra? {row:otra, mia:false} : null;
 }
 
-/* ═══ COLA OFFLINE ═══ */
-const Q = { get:()=>JSON.parse(LS.getItem("cola")||"[]"), set:v=>LS.setItem("cola",JSON.stringify(v)) };
-function encolar(item){ const q=Q.get(); q.push(item); Q.set(q); pintarPendientes(); }
-async function sincronizar(){
-  if(!navigator.onLine) return;
-  let q = Q.get(); if(!q.length){ pintarPendientes(); return; }
-  for(const it of q){
-    if(it.listo) continue;
-    try{
-      if(it.foto && !it.args.p_foto_url){
-        const blob = await (await fetch(it.foto)).blob();
-        it.args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(it.args.p_dpi)}_${it.id}.jpg`, blob);
-        it.foto = null; Q.set(q);
-      }
-      const r = await sbRpc("registrar_llegada_kiosko", it.args);
-      if(r && r.ok){ it.listo=true; it.turno=r.turno; it.nombre=r.nombre; Q.set(q); }
-    }catch(e){ console.log("sync:", e.message); break; }
+/* ═══ COLA OFFLINE ═══
+   Reglas de oro (arreglo del atorón de "en cola local"):
+   1. UN registro con problema NUNCA bloquea a los demás (antes un solo
+      error hacía break y los 26 de atrás jamás se intentaban).
+   2. El TURNO manda: si la selfie no se puede subir tras 3 intentos, el
+      registro se envía SIN foto (el turno vale más que la selfie).
+   3. Solo se detiene el barrido cuando de verdad no hay red.            */
+const Q = { get:()=>JSON.parse(LS.getItem("cola")||"[]"), set:v=>setColaSegura(v) };
+function setColaSegura(v){
+  try{ LS.setItem("cola", JSON.stringify(v)); }
+  catch(e){ // localStorage lleno: soltar las fotos mas viejas (los datos quedan)
+    for(const it of v){ if(it.foto){ it.foto=null; } }
+    try{ LS.setItem("cola", JSON.stringify(v)); }catch(e2){ console.log("cola llena:", e2.message); }
   }
-  Q.set(q.filter(it => !it.listo || (Date.now()-it.ts) < 3600e3));
-  pintarPendientes();
+}
+const esCorteRed = e => (e instanceof TypeError) || /failed to fetch|networkerror|load failed/i.test(e&&e.message||"");
+function encolar(item){ const q=Q.get(); q.push(item); Q.set(q); pintarPendientes(); }
+let SYNC_CORRIENDO = false;
+async function sincronizar(){
+  if(!navigator.onLine || SYNC_CORRIENDO) return;
+  SYNC_CORRIENDO = true;
+  try{
+    let q = Q.get(); if(!q.length){ pintarPendientes(); return; }
+    for(const it of q){
+      if(it.listo || it.descartado) continue;
+      // registro viejo (>18 h sin poder enviarse): ya no tiene sentido darle
+      // turno al dia siguiente — se descarta y se avisa en la lista
+      if(Date.now() - it.ts > 18*3600e3){
+        it.descartado = true; it.err = "expiró (más de 18 h en cola)"; Q.set(q); continue;
+      }
+      // 1) selfie (mejor esfuerzo, jamas bloquea el turno)
+      if(it.foto && !it.args.p_foto_url){
+        try{
+          const blob = await (await fetch(it.foto)).blob();
+          it.args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(it.args.p_dpi)}_${it.id}.jpg`, blob);
+          it.foto = null; Q.set(q);
+        }catch(e){
+          if(esCorteRed(e)) break;                 // sin red: parar el barrido
+          it.intFoto = (it.intFoto||0)+1; it.err = ("foto: "+e.message).slice(0,90); Q.set(q);
+          if(it.intFoto >= 3){ it.foto = null; Q.set(q); }   // sigue SIN foto
+          else continue;                           // reintenta foto en 20 s
+        }
+      }
+      // item que era SOLO para reintentar la foto y ya no tiene foto: cerrar
+      if(it.soloFoto && !it.foto && !it.args.p_foto_url){
+        it.listo = true; it.turno = it.turno || "✓"; Q.set(q); continue;
+      }
+      // 2) registro del turno
+      try{
+        const r = await sbRpc("registrar_llegada_kiosko", it.args);
+        if(r && r.ok){ it.listo=true; it.turno=r.turno; it.nombre=r.nombre; it.err=null; }
+        else{
+          it.intRpc = (it.intRpc||0)+1; it.err = ((r&&r.error)||"error del servidor").slice(0,90);
+          if(it.intRpc >= 20) it.descartado = true;   // veneno: no atora el contador
+        }
+        Q.set(q);
+      }catch(e){
+        if(esCorteRed(e)) break;                   // sin red: parar el barrido
+        it.intRpc = (it.intRpc||0)+1; it.err = e.message.slice(0,90);
+        if(it.intRpc >= 30) it.descartado = true;
+        Q.set(q);
+      }
+    }
+    Q.set(q.filter(it => (!it.listo && !it.descartado) || (Date.now()-it.ts) < 3600e3));
+    pintarPendientes();
+  } finally { SYNC_CORRIENDO = false; }
 }
 function pintarPendientes(){
-  const q=Q.get(), pend=q.filter(i=>!i.listo).length;
+  const q=Q.get(), pend=q.filter(i=>!i.listo && !i.descartado).length;
   document.getElementById("pendtag").textContent = pend? `${pend} por enviar`: "";
   const el=document.getElementById("pendlist");
   el.innerHTML = q.length ? "<div class='card'><b>Últimos registros</b>" + q.slice(-8).reverse().map(i =>
-    `<div class='resline'>${i.listo? "✅ <b>Turno #"+i.turno+"</b>" : "⏳ En cola local"} · ${i.args.p_nombre||i.args.p_dpi} · ${i.args.p_tipo}</div>`).join("") + "</div>" : "";
+    `<div class='resline'>${i.listo? "✅ <b>Turno #"+i.turno+"</b>"
+      : i.descartado? "⚠️ No se pudo (avisar al supervisor)"
+      : "⏳ En cola local" + (i.err? " · reintentando…" : "")} · ${i.args.p_nombre||i.args.p_dpi} · ${i.args.p_tipo}</div>`).join("") + "</div>" : "";
 }
 
 /* ═══ NAVEGACIÓN ═══ */
@@ -569,11 +617,26 @@ async function enviar(){
   };
   const el = document.getElementById("turnores");
   if(navigator.onLine && key()){
+    let fotoPend = null;
     try{
-      if(ST.foto){ const blob=await (await fetch(ST.foto)).blob();
-        args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(args.p_dpi)}_${Date.now()}.jpg`, blob); }
+      // La selfie es MEJOR ESFUERZO: si no sube, el turno va igual sin foto
+      // (antes un fallo aqui mandaba todo a la cola aunque SI habia señal).
+      if(ST.foto){
+        try{
+          const blob=await (await fetch(ST.foto)).blob();
+          args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(args.p_dpi)}_${Date.now()}.jpg`, blob);
+        }catch(e){
+          if(esCorteRed(e)) throw e;      // sin red de verdad → a la cola
+          console.log("selfie no subio (sigue sin foto):", e.message);
+          fotoPend = ST.foto;             // se reintenta luego desde la cola
+        }
+      }
       const r = await sbRpc("registrar_llegada_kiosko", args);
       if(r && r.ok){
+        if(fotoPend){  // turno YA dado; la foto queda en cola para reintento
+          encolar({id:Date.now().toString(36), ts:Date.now(),
+                   args:{...args, p_foto_url:""}, foto:fotoPend, soloFoto:true});
+        }
         el.innerHTML = `<h2>🎫 Tu turno</h2><div class='turnazo'>#${r.turno}</div>
           <p><b>${r.nombre}</b> · ${ST.tipo}<br>Espera a que el supervisor te llame.</p>`;
         scr("sc-turno"); ST={}; refrescarEspejos(); return;
