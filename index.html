@@ -536,19 +536,20 @@ function pasoConfirm(){
   }else{
     const txt = document.getElementById("inped").value.trim();
     if(!txt){ msg.innerHTML="<div class='aviso err'>Escribe tu número de pedido.</div>"; return; }
-    const nums=[...new Set(txt.split(/[\s,]+/).filter(Boolean).map(normPed))], malos=[], clientes=[];
+    const nums=[...new Set(txt.split(/[\s,]+/).filter(Boolean).map(normPed))], avisos=[], clientes=[];
     for(const n of nums){
       const p = pedidoEnCache(n);
-      if(!p) malos.push(`${n}: no aparece en el sistema`);
-      else if((p.status_odoo||"")!=="listo") malos.push(`${n}: aún no está listo`);
-      else if(p.cliente_nombre && !clientes.includes(p.cliente_nombre)) clientes.push(p.cliente_nombre);
+      if(!p) avisos.push(`${n}: no aparece aún en el sistema`);
+      else if((p.status_odoo||"")==="ya_despachado") avisos.push(`${n}: en Odoo figura como ya despachado`);
+      else if((p.status_odoo||"")!=="listo") avisos.push(`${n}: aún no está listo en Odoo`);
+      if(p && p.cliente_nombre && !clientes.includes(p.cliente_nombre)) clientes.push(p.cliente_nombre);
     }
-    if(malos.length){
-      msg.innerHTML = "<div class='aviso err'>❌ "+malos.join("<br>❌ ")+
-        "<br><b>Sin un pedido válido no se asigna turno.</b> Verifica el número o acércate al supervisor.</div>";
-      return;
-    }
+    // ⚠️ REGLA: el turno NUNCA se bloquea por el estado del pedido. Odoo a
+    // veces va atrás (pedido recién liberado) o adelante (albarán cerrado en
+    // papeles antes de que llegue el camión — caso S15010) de la realidad
+    // del predio. Se AVISA y se continúa: el supervisor valida al asignar.
     ST.pedidos = nums.join(", "); ST.empresa = clientes.join(" / ") || "FOB";
+    ST.aviso = avisos.length ? avisos : null;
   }
   pintarResumen(); scr("sc-confirm");
 }
@@ -603,6 +604,10 @@ function pintarResumen(){
   if(ST.tipo==="IMP") l.push(`<div class='resline'>🚢 ${ST.imp} · 📦 ${ST.producto} · ${ST.cantidad||"—"} sacos</div>`);
   if(ST.tipo==="FOB") l.push(`<div class='resline'>📄 ${ST.pedidos} · 🏢 ${ST.empresa}</div>`);
   if(ST.tipo==="CIF") l.push(`<div class='resline'>🚛 ${ST.empresa}</div>`);
+  if(ST.aviso && ST.aviso.length)
+    l.push(`<div class='aviso info'>⚠️ ${ST.aviso.join("<br>⚠️ ")}<br>` +
+           `<b>Puedes continuar</b>: tu turno queda registrado y el supervisor ` +
+           `validará el pedido en bodega.</div>`);
   document.getElementById("resumen").innerHTML = l.join("");
 }
 async function enviar(){
