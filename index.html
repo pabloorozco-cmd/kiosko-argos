@@ -226,10 +226,14 @@ function parsePayload(t){
           nombre, nacimiento:nac, vence:ven, vigente:vig,
           cui:(f[8]||"").trim(), telefono:(f[9]||"").trim(), raw:t};
 }
-function validarIngreso(r){
+const LIC_B_MAX_SACOS = 230;   // CIF/FOB: tipo B hasta 230 sacos; 231+ exige A
+function validarIngreso(r, flujo){
   const letras = new Set((r.tipo||"").toUpperCase().replace(/[^A-Z]/g,"").split(""));
-  if(!letras.has("A"))
-    return `⛔ Tu licencia es tipo ${r.tipo||"—"}. Para ingresar se requiere licencia TIPO A.`;
+  const esImp = (flujo||"IMP") === "IMP";
+  // IMPORTACIONES: TIPO A sí o sí. CIF/FOB: A o B (la B con tope de sacos,
+  // que se valida al conocer el pedido).
+  if(esImp ? !letras.has("A") : !(letras.has("A")||letras.has("B")))
+    return `⛔ Tu licencia es tipo ${r.tipo||"—"}. Para este ingreso se requiere licencia ${esImp? "TIPO A" : "TIPO A o B"}.`;
   if(r.vigente === false)
     return `⛔ Tu licencia está VENCIDA${r.vence?` (venció el ${r.vence.toLocaleDateString("es-GT")})`:""}. Renuévala para poder ingresar.`;
   return null;
@@ -477,7 +481,7 @@ function onScan(texto){
   const r = parsePayload(texto);
   if(r.estado!=="ok" || !r.cui) return;      // sigue buscando
   pararCam();
-  const bloqueo = validarIngreso(r);
+  const bloqueo = validarIngreso(r, ST.tipo);
   if(bloqueo){ document.getElementById("bloqueomsg").textContent=bloqueo; scr("sc-bloqueo"); return; }
   ST.lic = r;
   const p = buscarPiloto(r.cui);
@@ -544,7 +548,23 @@ function pasoConfirm(){
       else if((p.status_odoo||"")!=="listo") avisos.push(`${n}: aún no está listo en Odoo`);
       if(p && p.cliente_nombre && !clientes.includes(p.cliente_nombre)) clientes.push(p.cliente_nombre);
     }
-    // ⚠️ REGLA: el turno NUNCA se bloquea por el estado del pedido. Odoo a
+    // ⛔ TOLERANCIA DE LICENCIA (esto SÍ bloquea): licencia sin "A" (tipo B)
+    // acepta viajes de hasta LIC_B_MAX_SACOS sacos; 231+ exige TIPO A.
+    // (Los pedidos que no están en el espejo suman 0: el supervisor remata.)
+    const letrasLic = new Set((ST.lic.tipo||"").toUpperCase().replace(/[^A-Z]/g,"").split(""));
+    let totSacos = 0;
+    for(const n of nums){
+      const p = pedidoEnCache(n);
+      if(p && p.cantidades)
+        for(const mm of String(p.cantidades).match(/\d+/g)||[]) totSacos += parseInt(mm);
+    }
+    if(!letrasLic.has("A") && totSacos > LIC_B_MAX_SACOS){
+      msg.innerHTML = `<div class='aviso err'>⛔ Tu licencia tipo ${ST.lic.tipo||"—"} `+
+        `permite viajes de hasta <b>${LIC_B_MAX_SACOS} sacos</b> y este pedido lleva `+
+        `<b>${totSacos}</b>. Se requiere licencia <b>TIPO A</b>. Acércate al supervisor.</div>`;
+      return;
+    }
+    // ⚠️ REGLA: el turno NUNCA se bloquea por el ESTADO del pedido. Odoo a
     // veces va atrás (pedido recién liberado) o adelante (albarán cerrado en
     // papeles antes de que llegue el camión — caso S15010) de la realidad
     // del predio. Se AVISA y se continúa: el supervisor valida al asignar.
