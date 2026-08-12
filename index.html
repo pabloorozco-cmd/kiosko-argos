@@ -142,7 +142,7 @@ video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:c
       <input id="inped" placeholder="Ej: S12345, S12346">
     </div>
     <div id="placamsg"></div>
-    <button class="btn p" onclick="pasoConfirm()">Continuar →</button>
+    <button class="btn p" id="btncont" onclick="pasoConfirm()">Continuar →</button>
     <button class="btn gh" onclick="volverMenu()">← Cancelar</button>
   </div>
 </section>
@@ -171,7 +171,7 @@ video{width:100%;border-radius:14px;background:#000;max-height:52vh;object-fit:c
   <div class="card">
     <h2>Confirma tus datos</h2>
     <div id="resumen"></div>
-    <button class="btn p" onclick="enviar()">✅ Confirmar y obtener turno</button>
+    <button class="btn p" id="btnenviar" onclick="enviar()">✅ Confirmar y obtener turno</button>
     <button class="btn gh" onclick="volverMenu()">← Empezar de nuevo</button>
   </div>
 </section>
@@ -218,7 +218,12 @@ function parsePayload(t){
   if(f.length < 10) return {estado:"formato_desconocido", raw:t};
   const fecha = s => { const m = String(s||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
                        return m ? new Date(+m[3], +m[2]-1, +m[1]) : null; };
-  const nac = fecha(f[6]), ven = fecha(f[7]);
+  let nac = fecha(f[6]), ven = fecha(f[7]);
+  // Emisiones Bicentenario 2025+: las fechas vienen en otro orden. Nadie
+  // vence antes de nacer → nacimiento = la menor, vencimiento = la mayor.
+  if(nac && ven && ven < nac){ const _t = nac; nac = ven; ven = _t; }
+  // una sola fecha y es futura → es el vencimiento, no un nacimiento
+  if(!ven && nac && nac > hoyGT()){ ven = nac; nac = null; }
   const nombre = [f[2],f[3],f[4],f[5]].map(x=>String(x||"").trim()).filter(Boolean).join(" ");
   let vig = null;
   if(ven){ const h=hoyGT(); h.setHours(0,0,0,0); vig = ven >= h; }
@@ -240,41 +245,125 @@ function validarIngreso(r, flujo){
 }
 const fISO = d => d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}` : null;
 
-/* ═══ SUPABASE REST ═══ */
-async function sbGet(path){
-  const r = await fetch(CFG.SUPABASE_URL+path, {headers:{apikey:key(),Authorization:"Bearer "+key()}});
-  if(!r.ok) throw new Error("HTTP "+r.status);
-  return r.json();
-}
-async function sbRpc(fn, args){
+/* ═══ SUPABASE REST ═══
+   anon NO tiene permisos sobre ninguna tabla (revocados el 12/08/2026): solo
+   puede EJECUTAR espejos_kiosko y registrar_llegada_kiosko, ambas SECURITY
+   DEFINER. Todo fetch a /rest/v1/<tabla> devuelve 403. Aquí no se agrega una
+   sola llamada que no sea /rest/v1/rpc/ o Storage.
+
+   TIMEOUTS — el riesgo NO es simétrico y por eso son cuatro valores:
+   sin AbortSignal, un fetch en Android tarda entre 30 y 130 s en fallar y la
+   pantalla del piloto se queda congelada todo ese rato. Pero abortar tiene su
+   propio costo, y depende de qué se estaba haciendo:
+     · LECTURA (espejos, 8 s): abortar no cuesta nada, se reintenta.
+     · SUBIDA de la selfie (25 s): son ~100 KB y con señal mala eso es ~4 KB/s.
+       Lo peor que deja un aborto es una foto huérfana en Storage.
+     · ESCRITURA del turno (15 s): si el POST llegó y se pierde el ACK, el
+       servidor YA insertó. Reintentar duplicaría el turno. Por eso se le da
+       más aire que a una lectura, y por eso un timeout aquí NO se reintenta
+       solo (ver "dudoso" en la cola).                                        */
+const T_SONDEO = 3000, T_LECTURA = 8000, T_SUBIDA = 25000, T_ESCRITURA = 15000;
+// AbortSignal.timeout no existe en las tablets Lenovo viejas; sin este
+// respaldo se perdería el timeout justo donde más falta hace.
+const sig = ms => AbortSignal.timeout ? AbortSignal.timeout(ms)
+                : (()=>{ const c=new AbortController(); setTimeout(()=>c.abort(), ms); return c.signal; })();
+
+async function sbRpc(fn, args, o){
+  o = o || {};
   const r = await fetch(CFG.SUPABASE_URL+"/rest/v1/rpc/"+fn, {
     method:"POST", headers:{apikey:key(),Authorization:"Bearer "+key(),"Content-Type":"application/json"},
-    body:JSON.stringify(args)});
+    body:JSON.stringify(args), signal: sig(o.timeout || T_LECTURA)});
+  // El servidor contestó: hay red de verdad, aunque el cuerpo tarde en bajar.
+  if(o.alResponder) o.alResponder(r);
   if(!r.ok) throw new Error("RPC "+r.status+": "+await r.text());
   return r.json();
 }
-async function sbUpload(path, blob){
+async function sbUpload(path, blob, o){
+  o = o || {};
   const r = await fetch(CFG.SUPABASE_URL+"/storage/v1/object/fotos/"+path, {
     method:"POST", headers:{apikey:key(),Authorization:"Bearer "+key(),
-    "Content-Type":"image/jpeg","x-upsert":"true"}, body:blob});
+    "Content-Type":"image/jpeg","x-upsert":"true"}, body:blob, signal: sig(o.timeout || T_SUBIDA)});
   if(!r.ok) throw new Error("Storage "+r.status);
   return CFG.SUPABASE_URL+"/storage/v1/object/public/fotos/"+path;
 }
 
-/* ═══ ESPEJOS LOCALES (para trabajar sin señal) ═══ */
+/* ═══ ESPEJOS LOCALES (para trabajar sin señal) + ESTADO DE RED ═══
+   navigator.onLine MIENTE en Android: devuelve true en cuanto la tablet está
+   asociada al AP Wi-Fi, aunque no haya internet — que es exactamente lo que
+   pasa en bodega, con el AP vivo y el backhaul caído. Solo se puede confiar en
+   el NEGATIVO: si dice false, de verdad no hay enlace.
+   El sondeo real es espejos_kiosko. No se inventa otro endpoint: anon no tiene
+   permisos sobre ninguna tabla, así que un HEAD a /rest/v1/<tabla> daría 403 y
+   no probaría nada. Y mata dos pájaros — si responde, hay red Y el espejo
+   acaba de refrescarse.                                                      */
 const M = { get:k=>JSON.parse(LS.getItem("m_"+k)||"[]"), set:(k,v)=>LS.setItem("m_"+k,JSON.stringify(v)) };
-async function refrescarEspejos(){
-  if(!navigator.onLine || !key()) return;
+let RED = { ok:false, ts:0 };
+function marcarRed(ok){ RED = {ok:!!ok, ts:Date.now()}; estadoRed(); }
+const esperar = ms => new Promise(r => setTimeout(r, ms));
+
+let ESPEJO_EN_VUELO = null;
+function refrescarEspejos(){
+  if(ESPEJO_EN_VUELO) return ESPEJO_EN_VUELO;   // el sondeo y el intervalo no se pisan
+  const p = pedirEspejos();
+  ESPEJO_EN_VUELO = p;
+  p.catch(()=>{}).then(()=>{ if(ESPEJO_EN_VUELO === p) ESPEJO_EN_VUELO = null; pintarEspejo(); });
+  return p;
+}
+async function pedirEspejos(){
+  if(!navigator.onLine || !key()){ marcarRed(false); return false; }
   try{
     // Una sola llamada segura (RLS activo): la función espejos_kiosko entrega
     // los campos mínimos de pilotos, flota, pedidos y cartas de porte.
-    const r = await sbRpc("espejos_kiosko", {});
+    const r = await sbRpc("espejos_kiosko", {}, {timeout:T_LECTURA,
+      // El veredicto de red se da cuando llegan las CABECERAS, no cuando
+      // termina de bajar el cuerpo: son cientos de registros y no tienen por
+      // qué caber en el presupuesto de 3 s del sondeo.
+      alResponder: ()=> marcarRed(true)});
     if(r && r.pilotos){
       M.set("pilotos", r.pilotos); M.set("vehiculos", r.vehiculos||[]);
       M.set("pedidos", r.pedidos||[]); M.set("cartas", r.cartas||[]);
       LS.setItem("m_ts", Date.now());
+      return true;
     }
-  }catch(e){ console.log("espejos:", e.message); }
+    console.log("espejos: respuesta sin pilotos");   // m_ts NO se toca: el espejo envejece a la vista
+    return false;
+  }catch(e){
+    if(esCorteRed(e)) marcarRed(false);
+    console.log("espejos:", e.message);
+    return false;
+  }
+}
+/* Antigüedad del espejo, A LA VISTA. Antes, si espejos_kiosko fallaba, el
+   catch lo escribía en la consola y el espejo quedaba congelado para siempre
+   sin ninguna señal en pantalla: el asesor liberaba S15010, el sync lo metía a
+   pedidos_cache, y el kiosko seguía diciendo "no aparece aún en el sistema"
+   porque su copia local era de hacía 40 minutos. Nadie podía darse cuenta. */
+function edadEspejo(){
+  const ts = parseInt(LS.getItem("m_ts")||"0", 10);
+  return ts ? Date.now() - ts : null;
+}
+function textoEdad(ms){
+  const min = Math.floor(ms/60000);
+  if(min < 1)  return "hace segundos";
+  if(min < 60) return `hace ${min} min`;
+  return `hace ${Math.floor(min/60)} h ${min%60} min`;
+}
+function pintarEspejo(){
+  const e = document.getElementById("hbod"); if(!e) return;
+  const b = bodega()? "Bodega " + bodega() : "Kiosko de pilotos";
+  const ms = edadEspejo();
+  // con refresco cada 90 s, pasar de 10 minutos significa que algo lleva rato fallando
+  e.innerHTML = (ms === null || ms > 10*60000)
+    ? `${b} · <b>⚠️ SIN SINCRONIZAR</b>`
+    : `${b} · ${textoEdad(ms)} · ${M.get("pedidos").length} pedidos`;
+}
+// ¿Hay internet DE VERDAD? Espera como mucho maxEspera (3 s): el piloto no se
+// queda mirando una pantalla muerta mientras se decide.
+async function hayRed(maxEspera){
+  if(!navigator.onLine){ marcarRed(false); return false; }   // el negativo sí es confiable
+  if(Date.now() - RED.ts < 45000) return RED.ok;             // veredicto reciente: no sondear otra vez
+  await Promise.race([refrescarEspejos(), esperar(maxEspera || T_SONDEO)]);
+  return RED.ok;
 }
 const buscarPiloto = dpi => { const n=normId(dpi);
   return M.get("pilotos").find(p => normId(p.dpi)===n || normId(p.licencia_num)===n) || null; };
@@ -298,73 +387,217 @@ function cartaPorNumero(num, lic){
       error hacía break y los 26 de atrás jamás se intentaban).
    2. El TURNO manda: si la selfie no se puede subir tras 3 intentos, el
       registro se envía SIN foto (el turno vale más que la selfie).
-   3. Solo se detiene el barrido cuando de verdad no hay red.            */
-const Q = { get:()=>JSON.parse(LS.getItem("cola")||"[]"), set:v=>setColaSegura(v) };
-function setColaSegura(v){
-  try{ LS.setItem("cola", JSON.stringify(v)); }
-  catch(e){ // localStorage lleno: soltar las fotos mas viejas (los datos quedan)
-    for(const it of v){ if(it.foto){ it.foto=null; } }
-    try{ LS.setItem("cola", JSON.stringify(v)); }catch(e2){ console.log("cola llena:", e2.message); }
+   3. Solo se detiene el barrido cuando de verdad no hay red.
+
+   ⛔ INVARIANTE — NO LO ROMPAS. Aquí se perdían pilotos.
+   Toda escritura de localStorage["cola"] ocurre dentro de una función
+   SÍNCRONA que RELEE la cola justo antes de escribirla, sin ningún await
+   entre la lectura y la escritura. El bucle de eventos de JS garantiza que
+   nadie se cuela en medio.
+   Lo que había antes: sincronizar() capturaba `let q = Q.get()`, hacía awaits
+   de hasta 40 s (subir la selfie, el RPC) y al final escribía Q.set(q). Si un
+   piloto se registraba durante esos awaits, encolar() lo metía a localStorage
+   y el Q.set() posterior lo pisaba con el snapshot viejo: el piloto veía
+   "quedaste GUARDADO", su registro desaparecía y su turno nunca llegaba.
+   Regla práctica: si ves un array de la cola que cruzó un `await` antes de
+   escribirse, el bug volvió. Se muta con mutarItem() y se quita con
+   purgarCola(), nunca de otra forma.                                        */
+const Q = { get:()=>{ try{ return JSON.parse(LS.getItem("cola")||"[]"); }catch(e){ return []; } } };
+const leerItem = id => Q.get().find(x => x.id === id) || null;
+
+/* ── LAS SELFIES VIVEN FUERA DEL JSON DE LA COLA ──
+   Cada selfie es un data-URL de ~100 KB. Mientras estaban DENTRO del array,
+   cada lectura o escritura de la cola serializaba todas las fotos de forma
+   síncrona, y un barrido hace varias por ítem cada 20 s: con 10 registros en
+   cola eran varios segundos de UI totalmente congelada, en bucle. Ahora en la
+   cola solo queda el flag `tieneFoto` y la imagen va en "foto_"+id.           */
+const fotoGet = id => LS.getItem("foto_"+id);
+const fotoDel = id => LS.removeItem("foto_"+id);
+function fotoSet(id, dataUrl){
+  if(!dataUrl) return false;
+  try{ LS.setItem("foto_"+id, dataUrl); return true; }
+  catch(e){
+    // Sin espacio: se suelta la selfie más vieja y se reintenta UNA vez. Si aun
+    // así no cabe, el registro sigue SIN foto: el turno vale más que la selfie.
+    if(!soltarFotoMasVieja(id)) return false;
+    try{ LS.setItem("foto_"+id, dataUrl); return true; }
+    catch(e2){ console.log("foto no cabe:", e2.message); return false; }
   }
 }
-const esCorteRed = e => (e instanceof TypeError) || /failed to fetch|networkerror|load failed/i.test(e&&e.message||"");
-function encolar(item){ const q=Q.get(); q.push(item); Q.set(q); pintarPendientes(); }
+function soltarFotoMasVieja(exceptoId){
+  const con = Q.get().filter(i => i.tieneFoto && i.id !== exceptoId);
+  if(!con.length) return false;
+  const v = con.reduce((a,b) => a.ts <= b.ts ? a : b);
+  fotoDel(v.id); mutarItem(v.id, x => { x.tieneFoto = false; });
+  return true;
+}
+// Una foto_* sin dueño son ~100 KB muertos dentro de una cuota de ~5 MB.
+function limpiarFotosHuerfanas(){
+  const vivas = new Set(Q.get().map(i => "foto_"+i.id));
+  const sobran = [];
+  for(let i=0; i<LS.length; i++){
+    const k = LS.key(i);
+    if(k && k.indexOf("foto_")===0 && !vivas.has(k)) sobran.push(k);
+  }
+  for(const k of sobran) LS.removeItem(k);
+}
+// Las tablets que ya están en la calle traen colas con la selfie DENTRO del
+// JSON. Si no se migran al arrancar, esas selfies quedan huérfanas y el
+// registro se envía sin foto.
+function migrarCola(){
+  const q = Q.get(); let cambio = false;
+  for(const it of q){
+    if("foto" in it){
+      if(typeof it.foto === "string" && it.foto) it.tieneFoto = fotoSet(it.id, it.foto);
+      delete it.foto; cambio = true;
+    }
+    if(it.tieneFoto === undefined){ it.tieneFoto = false; cambio = true; }
+  }
+  if(cambio) escribirCola(q);
+}
+function escribirCola(q){
+  try{ LS.setItem("cola", JSON.stringify(q)); }
+  catch(e){
+    // localStorage lleno. Las fotos ya no viven en este JSON: lo que hay que
+    // soltar son las claves foto_*. Los datos del registro —que es lo que da
+    // el turno— siempre caben.
+    for(const it of q){ if(it.tieneFoto){ fotoDel(it.id); it.tieneFoto = false; } }
+    try{ LS.setItem("cola", JSON.stringify(q)); }catch(e2){ console.log("cola llena:", e2.message); }
+  }
+}
+// RELEE → muta → escribe. Ni un await aquí dentro.
+// Devuelve el ítem ya escrito, o null si otro flujo lo purgó mientras el
+// llamador estaba en un await.
+function mutarItem(id, fn){
+  const q = Q.get();
+  const i = q.findIndex(x => x.id === id);
+  if(i < 0) return null;
+  fn(q[i]);
+  escribirCola(q);
+  return q[i];
+}
+// La ÚNICA función que quita ítems de la cola. Igual: relee y escribe sin awaits.
+function purgarCola(){
+  const q = Q.get();
+  const vivos = q.filter(it =>
+    // un DUDOSO no se reintenta, pero se queda a la vista hasta que termine el
+    // turno de trabajo: alguien tiene que verificarlo con el supervisor
+    it.dudoso ? (Date.now()-it.ts) < 18*3600e3
+              : (!it.listo && !it.descartado) || (Date.now()-it.ts) < 3600e3);
+  if(vivos.length !== q.length) escribirCola(vivos);
+  limpiarFotosHuerfanas();   // las selfies de los que salieron ya no tienen dueño
+}
+/* Un timeout NO es lo mismo que un corte de red, y la diferencia decide si se
+   puede reintentar:
+     · corte limpio (TypeError "Failed to fetch"): el POST nunca salió del
+       dispositivo. Reintentar es seguro.
+     · timeout (AbortError/TimeoutError): el POST pudo haber llegado y haberse
+       ejecutado; lo que se perdió fue la respuesta. Reintentar la ESCRITURA
+       del turno duplicaría el registro.                                      */
+const esTimeout  = e => !!e && (e.name === "AbortError" || e.name === "TimeoutError");
+const esCorteRed = e => (e instanceof TypeError) || esTimeout(e)
+                        || /failed to fetch|networkerror|load failed/i.test(e&&e.message||"");
+function encolar(item){
+  const foto = item.foto; delete item.foto;      // la selfie va a su propia clave
+  item.tieneFoto = fotoSet(item.id, foto);
+  const q=Q.get(); q.push(item); escribirCola(q); pintarPendientes();
+}
 let SYNC_CORRIENDO = false;
 async function sincronizar(){
-  if(!navigator.onLine || SYNC_CORRIENDO) return;
-  SYNC_CORRIENDO = true;
+  if(SYNC_CORRIENDO) return;
+  // Se itera sobre IDS, no sobre objetos: el ítem se RELEE en cada vuelta y
+  // después de cada await, porque la cola pudo cambiar mientras tanto.
+  const q0 = Q.get();
+  const ids = q0.filter(i => !i.listo && !i.descartado && !i.dudoso).map(i => i.id);
+  // Sin pendientes no se hace NADA: ni sondeo de red, ni purga, ni repintado.
+  // Este tick corre cada 20 s y la cola vacía es el caso normal.
+  if(!ids.length){ if(q0.length){ purgarCola(); pintarPendientes(); } return; }
+  SYNC_CORRIENDO = true;   // se levanta ANTES del primer await, si no dos barridos se cruzan
   try{
-    let q = Q.get(); if(!q.length){ pintarPendientes(); return; }
-    for(const it of q){
-      if(it.listo || it.descartado) continue;
+    if(!(await hayRed())) return;   // sondeo real, no navigator.onLine
+    for(const id of ids){
+      let it = leerItem(id);
+      if(!it || it.listo || it.descartado || it.dudoso) continue;   // cambió mientras corría un await
       // registro viejo (>18 h sin poder enviarse): ya no tiene sentido darle
       // turno al dia siguiente — se descarta y se avisa en la lista
       if(Date.now() - it.ts > 18*3600e3){
-        it.descartado = true; it.err = "expiró (más de 18 h en cola)"; Q.set(q); continue;
+        mutarItem(id, x => { x.descartado = true; x.err = "expiró (más de 18 h en cola)"; });
+        continue;
       }
       // 1) selfie (mejor esfuerzo, jamas bloquea el turno)
-      if(it.foto && !it.args.p_foto_url){
-        try{
-          const blob = await (await fetch(it.foto)).blob();
-          it.args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(it.args.p_dpi)}_${it.id}.jpg`, blob);
-          it.foto = null; Q.set(q);
+      if(it.tieneFoto && !it.args.p_foto_url){
+        const dataUrl = fotoGet(id);
+        if(!dataUrl){ it = mutarItem(id, x => { x.tieneFoto = false; }); }   // se soltó por espacio
+        else try{
+          const blob = await (await fetch(dataUrl)).blob();
+          const url  = await sbUpload(`pilotos/rostro_${normId(it.args.p_dpi)}_${id}.jpg`, blob);
+          it = mutarItem(id, x => { x.args.p_foto_url = url; x.tieneFoto = false; });
+          fotoDel(id);
         }catch(e){
-          if(esCorteRed(e)) break;                 // sin red: parar el barrido
-          it.intFoto = (it.intFoto||0)+1; it.err = ("foto: "+e.message).slice(0,90); Q.set(q);
-          if(it.intFoto >= 3){ it.foto = null; Q.set(q); }   // sigue SIN foto
-          else continue;                           // reintenta foto en 20 s
+          // Solo un corte LIMPIO para el barrido. Una selfie que se pasa de los
+          // 25 s cuenta como intento fallido de la FOTO, no como falta de red:
+          // si no, un solo registro con una foto lenta dejaría atorados a todos
+          // los de atrás (regla de oro 1).
+          if(esCorteRed(e) && !esTimeout(e)) break;
+          it = mutarItem(id, x => {
+            x.intFoto = (x.intFoto||0)+1;
+            x.err = ("foto: "+e.message).slice(0,90);
+            if(x.intFoto >= 3) x.tieneFoto = false;   // se rinde: sigue SIN foto
+          });
+          if(it && it.tieneFoto) continue;         // reintenta la foto en 20 s
+          fotoDel(id);
         }
+        if(!it) continue;                          // lo purgaron mientras subía
       }
       // item que era SOLO para reintentar la foto y ya no tiene foto: cerrar
-      if(it.soloFoto && !it.foto && !it.args.p_foto_url){
-        it.listo = true; it.turno = it.turno || "✓"; Q.set(q); continue;
+      if(it.soloFoto && !it.tieneFoto && !it.args.p_foto_url){
+        mutarItem(id, x => { x.listo = true; x.turno = x.turno || "✓"; });
+        continue;
       }
-      // 2) registro del turno
+      // 2) registro del turno — con los args RECIÉN leídos: p_foto_url pudo
+      //    cambiar en el paso anterior.
       try{
-        const r = await sbRpc("registrar_llegada_kiosko", it.args);
-        if(r && r.ok){ it.listo=true; it.turno=r.turno; it.nombre=r.nombre; it.err=null; }
-        else{
-          it.intRpc = (it.intRpc||0)+1; it.err = ((r&&r.error)||"error del servidor").slice(0,90);
-          if(it.intRpc >= 20) it.descartado = true;   // veneno: no atora el contador
-        }
-        Q.set(q);
+        const r = await sbRpc("registrar_llegada_kiosko", it.args, {timeout:T_ESCRITURA});
+        mutarItem(id, x => {
+          if(r && r.ok){ x.listo=true; x.turno=r.turno; x.nombre=r.nombre; x.err=null; }
+          else{
+            x.intRpc = (x.intRpc||0)+1; x.err = ((r&&r.error)||"error del servidor").slice(0,90);
+            if(x.intRpc >= 20) x.descartado = true;   // veneno: no atora el contador
+          }
+        });
       }catch(e){
+        // ⚠️ El orden importa: primero timeout, DESPUÉS corte de red.
+        // Timeout = el turno pudo haber quedado registrado y solo se perdió la
+        // respuesta. Reintentar daría dos turnos al mismo piloto, así que se
+        // marca DUDOSO: no se reintenta solo, se verifica con el supervisor.
+        // (Mitigación mientras no exista la clave de idempotencia, que va en P5.)
+        if(esTimeout(e)){
+          mutarItem(id, x => { x.dudoso = true; x.err = "sin confirmación del servidor"; });
+          continue;
+        }
         if(esCorteRed(e)) break;                   // sin red: parar el barrido
-        it.intRpc = (it.intRpc||0)+1; it.err = e.message.slice(0,90);
-        if(it.intRpc >= 30) it.descartado = true;
-        Q.set(q);
+        mutarItem(id, x => {
+          x.intRpc = (x.intRpc||0)+1; x.err = e.message.slice(0,90);
+          if(x.intRpc >= 30) x.descartado = true;
+        });
       }
     }
-    Q.set(q.filter(it => (!it.listo && !it.descartado) || (Date.now()-it.ts) < 3600e3));
+    purgarCola();
     pintarPendientes();
   } finally { SYNC_CORRIENDO = false; }
 }
 function pintarPendientes(){
-  const q=Q.get(), pend=q.filter(i=>!i.listo && !i.descartado).length;
-  document.getElementById("pendtag").textContent = pend? `${pend} por enviar`: "";
+  const q=Q.get();
+  // Los DUDOSOS se cuentan aparte: "por enviar" promete un envío que no va a
+  // ocurrir, porque a un dudoso nadie lo reintenta.
+  const pend=q.filter(i=>!i.listo && !i.descartado && !i.dudoso).length;
+  const dud =q.filter(i=>i.dudoso).length;
+  document.getElementById("pendtag").textContent =
+    [pend? `${pend} por enviar`:"", dud? `${dud} a verificar`:""].filter(Boolean).join(" · ");
   const el=document.getElementById("pendlist");
   el.innerHTML = q.length ? "<div class='card'><b>Últimos registros</b>" + q.slice(-8).reverse().map(i =>
     `<div class='resline'>${i.listo? "✅ <b>Turno #"+i.turno+"</b>"
+      : i.dudoso? "🔎 <b>Verificar con el supervisor</b> (no sabemos si quedó registrado)"
       : i.descartado? "⚠️ No se pudo (avisar al supervisor)"
       : "⏳ En cola local" + (i.err? " · reintentando…" : "")} · ${i.args.p_nombre||i.args.p_dpi} · ${i.args.p_tipo}</div>`).join("") + "</div>" : "";
 }
@@ -529,7 +762,7 @@ function selfieOk(){
 }
 
 /* ═══ PASOS CIF / FOB ═══ */
-function pasoConfirm(){
+async function pasoConfirm(){
   const placa = canonD(document.getElementById("inplaca").value);
   const msg = document.getElementById("placamsg"); msg.innerHTML="";
   if(!placa || placa.length<4){ msg.innerHTML="<div class='aviso err'>Escribe la placa del cabezal.</div>"; return; }
@@ -540,7 +773,19 @@ function pasoConfirm(){
   }else{
     const txt = document.getElementById("inped").value.trim();
     if(!txt){ msg.innerHTML="<div class='aviso err'>Escribe tu número de pedido.</div>"; return; }
-    const nums=[...new Set(txt.split(/[\s,]+/).filter(Boolean).map(normPed))], avisos=[], clientes=[];
+    const nums=[...new Set(txt.split(/[\s,]+/).filter(Boolean).map(normPed))];
+    // ⚠️ Antes de decirle al piloto que su pedido "no aparece aún en el
+    // sistema", hay que descartar que el viejo sea el espejo. Ese es el bug
+    // reportado. Se FUERZA una llamada a espejos_kiosko y se vuelve a buscar.
+    // No se consulta pedidos_cache por REST: anon no tiene permisos → 403.
+    if(nums.some(n => !pedidoEnCache(n))){
+      const btn = document.getElementById("btncont");
+      msg.innerHTML = "<div class='aviso info'>⏳ Buscando tu pedido en el sistema…</div>";
+      if(btn) btn.disabled = true;
+      try{ if(await hayRed()) await refrescarEspejos(); }
+      finally{ if(btn) btn.disabled = false; msg.innerHTML = ""; }
+    }
+    const avisos=[], clientes=[];
     for(const n of nums){
       const p = pedidoEnCache(n);
       if(!p) avisos.push(`${n}: no aparece aún en el sistema`);
@@ -630,7 +875,16 @@ function pintarResumen(){
            `validará el pedido en bodega.</div>`);
   document.getElementById("resumen").innerHTML = l.join("");
 }
+// El botón se bloquea mientras se envía: en la tablet, con guantes, un doble
+// toque es otra forma de terminar con dos turnos. Y el piloto ve que algo está
+// pasando en vez de una pantalla muerta.
 async function enviar(){
+  const btn = document.getElementById("btnenviar");
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ Enviando…"; }
+  try{ await enviarAhora(); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "✅ Confirmar y obtener turno"; } }
+}
+async function enviarAhora(){
   const args = {
     p_bodega: bodega(), p_tipo: ST.tipo, p_dpi: ST.lic.cui,
     p_nombre: ST.nombre, p_placa: ST.placa||"", p_empresa: ST.empresa||"",
@@ -641,7 +895,9 @@ async function enviar(){
     p_telefono: ST.lic.telefono||"", p_nacimiento: fISO(ST.lic.nacimiento),
   };
   const el = document.getElementById("turnores");
-  if(navigator.onLine && key()){
+  // hayRed() sondea de verdad: navigator.onLine daba true con el AP vivo y el
+  // backhaul caído, y por ahí se iba el piloto a esperar 130 s en blanco.
+  if(key() && await hayRed()){
     let fotoPend = null;
     try{
       // La selfie es MEJOR ESFUERZO: si no sube, el turno va igual sin foto
@@ -651,12 +907,30 @@ async function enviar(){
           const blob=await (await fetch(ST.foto)).blob();
           args.p_foto_url = await sbUpload(`pilotos/rostro_${normId(args.p_dpi)}_${Date.now()}.jpg`, blob);
         }catch(e){
-          if(esCorteRed(e)) throw e;      // sin red de verdad → a la cola
+          // Solo un corte LIMPIO manda todo a la cola. Si la foto se pasó de
+          // los 25 s, el turno sigue de largo sin ella: el turno vale más.
+          if(esCorteRed(e) && !esTimeout(e)) throw e;
           console.log("selfie no subio (sigue sin foto):", e.message);
           fotoPend = ST.foto;             // se reintenta luego desde la cola
         }
       }
-      const r = await sbRpc("registrar_llegada_kiosko", args);
+      let r;
+      try{
+        r = await sbRpc("registrar_llegada_kiosko", args, {timeout:T_ESCRITURA});
+      }catch(e){
+        if(!esTimeout(e)) throw e;        // corte limpio u error del servidor → cola normal
+        // El POST pudo haber entrado y solo se perdió la respuesta. Mandarlo a
+        // la cola normal lo reintentaría y le daría DOS turnos al mismo piloto.
+        // Se guarda como dudoso —nadie lo reintenta— y se le dice claro que no
+        // se registre otra vez.
+        encolar({id:Date.now().toString(36), ts:Date.now(), args, foto:ST.foto||null,
+                 dudoso:true, err:"sin confirmación del servidor"});
+        el.innerHTML = `<h2>⚠️ No recibimos confirmación</h2>
+          <p><b>NO te registres otra vez.</b> Tu turno pudo haber quedado guardado, y
+          repetirlo te daría dos turnos.<br><b>Acércate al supervisor</b> para que lo
+          verifique en pantalla.</p>`;
+        scr("sc-turno"); ST={}; return;
+      }
       if(r && r.ok){
         if(fotoPend){  // turno YA dado; la foto queda en cola para reintento
           encolar({id:Date.now().toString(36), ts:Date.now(),
@@ -684,25 +958,35 @@ function pintarBodegas(){
   document.getElementById("bodbtns").innerHTML = CFG.BODEGAS.map(b =>
     `<button class="btn p" onclick="LS.setItem('bodega','${b}');arrancar()">${b}</button>`).join("");
 }
-function estadoRed(){ document.getElementById("dot").className = navigator.onLine? "on":""; }
+// El punto verde es la ÚNICA señal de red que ve el piloto. Pintarlo con
+// navigator.onLine lo dejaba verde dentro de la bodega sin internet: la misma
+// mentira. Ahora refleja el último sondeo real.
+function estadoRed(){ document.getElementById("dot").className = RED.ok? "on":""; }
 function arrancar(){
   estadoRed();
   const qs = new URLSearchParams(location.search);
   if(qs.get("bodega")) LS.setItem("bodega", qs.get("bodega"));
   if(!key()){ scr("sc-setup"); return; }
   if(!bodega()){ pintarBodegas(); scr("sc-bodega"); return; }
-  document.getElementById("hbod").textContent = "Bodega " + bodega();
+  migrarCola();   // colas viejas: la selfie sale del JSON antes de tocar nada
+  pintarEspejo();
   scr("sc-menu"); pintarPendientes(); refrescarEspejos(); sincronizar();
 }
-window.addEventListener("online", ()=>{estadoRed();sincronizar();refrescarEspejos();});
-window.addEventListener("offline", estadoRed);
+// "online" solo dice que apareció un enlace: hay que ir a sondear si de verdad
+// hay internet detrás. "offline" sí es concluyente.
+window.addEventListener("online", ()=>{ refrescarEspejos().then(sincronizar); });
+window.addEventListener("offline", ()=>marcarRed(false));
 el("fscan").onchange = ev => {
   const f = ev.target.files && ev.target.files[0];
   ev.target.value = "";
   if(f) decodificarFoto(f);
 };
 setInterval(sincronizar, 20000);
-setInterval(refrescarEspejos, 10*60*1000);
+// Cada 90 s, no cada 10 minutos: entre que el asesor libera el pedido y el
+// piloto lo teclea pasan minutos, no media hora.
+setInterval(refrescarEspejos, 90*1000);
+// La antigüedad tiene que envejecer sola en pantalla aunque no haya refrescos.
+setInterval(pintarEspejo, 30*1000);
 if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
 arrancar();
 </script>

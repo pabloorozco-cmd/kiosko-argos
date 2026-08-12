@@ -1,7 +1,11 @@
 /* Service worker del Kiosko — la app abre AL INSTANTE aunque no haya señal.
    App shell: cache-first (index, manifest, íconos, lector de códigos).
    Supabase: siempre red (nunca se cachean datos ni registros). */
-const CACHE = "kiosko-v7";
+// ⚠️ SUBE ESTE NÚMERO EN CADA CAMBIO DE index.html / zxingjs.js.
+// El app shell se sirve cache-first SIN revalidar (ver el fetch de abajo): una
+// tablet con el service worker ya instalado seguiría abriendo la versión vieja
+// para siempre. Cambiar el nombre del caché es lo que fuerza la actualización.
+const CACHE = "kiosko-v9";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest",
                "./icon-192.png", "./icon-512.png", "./zxingjs.js"];
 
